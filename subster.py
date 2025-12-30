@@ -2,6 +2,7 @@ import json
 import os
 import argparse
 from pathlib import Path
+import re
 
 def validate_substitutions(substitutions):
     """
@@ -52,8 +53,16 @@ def scan_for_unused_patterns(directory, substitutions, extensions=None):
             
             # Проверяем каждый шаблон
             for pattern in substitutions.keys():
-                if pattern not in found_patterns and pattern in content:
-                    found_patterns.add(pattern)
+                if pattern not in found_patterns:
+                    # Ищем прямое вхождение
+                    if pattern in content:
+                        found_patterns.add(pattern)
+                    # Ищем в одинарных кавычках
+                    elif f"'{pattern}'" in content:
+                        found_patterns.add(pattern)
+                    # Ищем в двойных кавычках
+                    elif f'"{pattern}"' in content:
+                        found_patterns.add(pattern)
                     
                     # Если нашли все шаблоны, прекращаем поиск
                     if len(found_patterns) == len(substitutions):
@@ -115,6 +124,36 @@ def load_and_validate_substitutions(json_file):
     
     return substitutions, [], None
 
+def replace_quoted_content(content, substitutions):
+    """
+    Заменяет текст внутри одинарных и двойных кавычек
+    """
+    # Регулярные выражения для нахождения текста в кавычках
+    single_quote_pattern = r"'([^']*)'"
+    double_quote_pattern = r'"([^"]*)"'
+    
+    # Функция для замены внутри найденных совпадений
+    def replace_in_match(match):
+        text = match.group(1)  # Текст внутри кавычек
+        original = match.group(0)  # Полное совпадение с кавычками
+        
+        # Проверяем каждую подстановку
+        for old_str, new_str in substitutions.items():
+            # Если текст полностью совпадает с тем, что нужно заменить
+            if text == old_str:
+                # Сохраняем тип кавычек
+                quote_char = original[0]
+                return f"{quote_char}{new_str}{quote_char}"
+        
+        return original
+    
+    # Применяем замены к тексту в одинарных кавычках
+    content = re.sub(single_quote_pattern, replace_in_match, content)
+    # Применяем замены к тексту в двойных кавычках
+    content = re.sub(double_quote_pattern, replace_in_match, content)
+    
+    return content
+
 def replace_in_file(file_path, substitutions):
     """
     Заменяет строки в одном файле согласно словарю подстановок
@@ -124,8 +163,13 @@ def replace_in_file(file_path, substitutions):
             content = f.read()
         
         original_content = content
+        
+        # 1. Заменяем обычный текст
         for old_str, new_str in substitutions.items():
             content = content.replace(old_str, new_str)
+        
+        # 2. Заменяем текст в кавычках
+        content = replace_quoted_content(content, substitutions)
         
         if content != original_content:
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -183,6 +227,8 @@ def main():
                        help='Показать, что будет изменено, без внесения правок')
     parser.add_argument('--force', '-f', action='store_true',
                        help='Продолжить работу несмотря на предупреждения (не рекомендуется)')
+    parser.add_argument('--quotes-only', '-q', action='store_true',
+                       help='Заменять только текст в кавычках (по умолчанию заменяет везде)')
     
     args = parser.parse_args()
     
@@ -243,11 +289,22 @@ def main():
             print(f"  '{old}' -> '{new}'")
         print("=" * 80)
     
+    # Показываем примеры замен
+    print("\nПримеры замен:")
+    print("-" * 40)
+    for old, new in list(substitutions.items())[:3]:  # Показываем первые 3 примера
+        print(f"  Обычный текст: {old} -> {new}")
+        print(f"  В одинарных кавычках: '{old}' -> '{new}'")
+        print(f"  В двойных кавычках: \"{old}\" -> \"{new}\"")
+        print()
+    
     if args.dry_run:
         print(f"\nРежим предпросмотра (dry-run). Файлы не будут изменены.")
         print(f"Будут обработаны файлы в: {args.directory}")
         if args.extensions:
             print(f"Только с расширениями: {args.extensions}")
+        if args.quotes_only:
+            print(f"Заменять только текст в кавычках")
         
         if unused_patterns:
             print(f"\nПРЕДУПРЕЖДЕНИЕ: {len(unused_patterns)} значений не будут использованы!")
@@ -260,8 +317,68 @@ def main():
     print(f"\nОбработка директории: {args.directory}")
     if args.extensions:
         print(f"Только файлы с расширениями: {args.extensions}")
+    if args.quotes_only:
+        print(f"Заменять только текст в кавычках")
     
-    changed, total = process_directory(args.directory, substitutions, args.extensions)
+    # Если указан флаг --quotes-only, временно модифицируем функцию замены
+    if args.quotes_only:
+        original_replace_in_file = replace_in_file
+        
+        def replace_quotes_only(file_path, subs):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                original_content = content
+                
+                # Заменяем только текст в кавычках
+                content = replace_quoted_content(content, subs)
+                
+                if content != original_content:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    return True
+                return False
+            except Exception as e:
+                print(f"Ошибка при обработке файла {file_path}: {e}")
+                return False
+        
+        # Используем модифицированную функцию
+        import functools
+        process_func = functools.partial(replace_quotes_only, subs=substitutions)
+        
+        # Переопределяем функцию для обработки
+        changed_files = 0
+        total_files = 0
+        
+        if args.extensions:
+            extensions = [ext.lower() if ext.startswith('.') else f'.{ext.lower()}' for ext in args.extensions]
+        
+        for root, dirs, files in os.walk(args.directory):
+            for file in files:
+                file_path = Path(root) / file
+                
+                # Пропускаем сам файл подстановок
+                if str(file_path).endswith('.json'):
+                    continue
+                
+                if args.extensions:
+                    if file_path.suffix.lower() not in extensions:
+                        continue
+                
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        f.read(1024)
+                except:
+                    continue
+                
+                total_files += 1
+                if replace_quotes_only(file_path, substitutions):
+                    changed_files += 1
+                    print(f"Изменен: {file_path}")
+    else:
+        # Используем стандартную обработку
+        changed, total = process_directory(args.directory, substitutions, args.extensions)
     
     print(f"\nГотово!")
     print(f"Обработано файлов: {total}")
