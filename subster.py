@@ -35,6 +35,26 @@ def validate_substitutions(substitutions):
     
     return issues
 
+def categorize_substitutions(substitutions):
+    """
+    Разделяет подстановки на два типа:
+    1. Многословные словосочетания (2+ слова)
+    2. Отдельные слова (1 слово)
+    """
+    multiword_subs = {}
+    singleword_subs = {}
+    
+    for old_str, new_str in substitutions.items():
+        # Считаем количество слов (разделитель - пробел)
+        word_count = len(old_str.strip().split())
+        
+        if word_count >= 2:
+            multiword_subs[old_str] = new_str
+        else:
+            singleword_subs[old_str] = new_str
+    
+    return multiword_subs, singleword_subs
+
 def scan_for_unused_patterns(directory, substitutions, extensions=None):
     """
     Сканирует файлы и возвращает список неиспользуемых шаблонов
@@ -124,9 +144,9 @@ def load_and_validate_substitutions(json_file):
     
     return substitutions, [], None
 
-def replace_quoted_content(content, substitutions):
+def replace_quoted_content(content, substitutions, pass_num):
     """
-    Заменяет текст внутри одинарных и двойных кавычек
+    Заменяет текст внутри одинарных и двойных кавычек с учетом номера прохода
     """
     # Регулярные выражения для нахождения текста в кавычках
     single_quote_pattern = r"'([^']*)'"
@@ -154,9 +174,11 @@ def replace_quoted_content(content, substitutions):
     
     return content
 
-def replace_in_file(file_path, substitutions):
+def replace_in_file_two_pass(file_path, multiword_subs, singleword_subs, quotes_only=False):
     """
-    Заменяет строки в одном файле согласно словарю подстановок
+    Заменяет строки в два прохода:
+    1. Сначала многословные словосочетания
+    2. Затем отдельные слова
     """
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -164,12 +186,25 @@ def replace_in_file(file_path, substitutions):
         
         original_content = content
         
-        # 1. Заменяем обычный текст
-        for old_str, new_str in substitutions.items():
-            content = content.replace(old_str, new_str)
-        
-        # 2. Заменяем текст в кавычках
-        content = replace_quoted_content(content, substitutions)
+        if quotes_only:
+            # Проход 1: Заменяем многословные словосочетания в кавычках
+            content = replace_quoted_content(content, multiword_subs, pass_num=1)
+            # Проход 2: Заменяем отдельные слова в кавычках
+            content = replace_quoted_content(content, singleword_subs, pass_num=2)
+        else:
+            # Проход 1: Заменяем многословные словосочетания везде
+            for old_str, new_str in multiword_subs.items():
+                content = content.replace(old_str, new_str)
+            
+            # Также заменяем многословные словосочетания в кавычках
+            content = replace_quoted_content(content, multiword_subs, pass_num=1)
+            
+            # Проход 2: Заменяем отдельные слова везде
+            for old_str, new_str in singleword_subs.items():
+                content = content.replace(old_str, new_str)
+            
+            # Также заменяем отдельные слова в кавычках
+            content = replace_quoted_content(content, singleword_subs, pass_num=2)
         
         if content != original_content:
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -180,9 +215,9 @@ def replace_in_file(file_path, substitutions):
         print(f"Ошибка при обработке файла {file_path}: {e}")
         return False
 
-def process_directory(directory, substitutions, extensions=None):
+def process_directory_two_pass(directory, multiword_subs, singleword_subs, extensions=None, quotes_only=False):
     """
-    Обрабатывает все файлы в директории и поддиректориях
+    Обрабатывает все файлы в директории и поддиректориях в два прохода
     """
     if extensions:
         extensions = [ext.lower() if ext.startswith('.') else f'.{ext.lower()}' for ext in extensions]
@@ -209,7 +244,7 @@ def process_directory(directory, substitutions, extensions=None):
                 continue
             
             total_files += 1
-            if replace_in_file(file_path, substitutions):
+            if replace_in_file_two_pass(file_path, multiword_subs, singleword_subs, quotes_only):
                 changed_files += 1
                 print(f"Изменен: {file_path}")
     
@@ -217,7 +252,7 @@ def process_directory(directory, substitutions, extensions=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Замена строк в текстовых файлах согласно JSON файлу подстановок'
+        description='Замена строк в текстовых файлах согласно JSON файлу подстановок (два прохода)'
     )
     parser.add_argument('directory', help='Директория для обработки')
     parser.add_argument('json_file', help='JSON файл с подстановками')
@@ -255,6 +290,14 @@ def main():
             print("\nИсправьте ошибки в файле подстановок и повторите попытку.")
             return 1
     
+    # Категоризируем подстановки
+    multiword_subs, singleword_subs = categorize_substitutions(substitutions)
+    
+    print(f"\nАнализ подстановок:")
+    print(f"Всего подстановок: {len(substitutions)}")
+    print(f"Многословные словосочетания (сначала): {len(multiword_subs)}")
+    print(f"Отдельные слова (потом): {len(singleword_subs)}")
+    
     # Проверяем, есть ли неиспользуемые шаблоны
     unused_patterns = scan_for_unused_patterns(args.directory, substitutions, args.extensions)
     
@@ -276,27 +319,46 @@ def main():
     # Выводим информацию о подстановках
     if issues and args.force:
         print("\nПРЕДУПРЕЖДЕНИЕ: работа продолжена принудительно, несмотря на ошибки!")
-        print("\nБудут применены следующие подстановки:")
-        print("=" * 80)
-        for old, new in substitutions.items():
-            print(f"  '{old}' -> '{new}'")
-        print("=" * 80)
-    elif not issues:
-        print(f"\nЗагружено {len(substitutions)} корректных подстановок")
-        print("Подстановки:")
-        print("=" * 80)
-        for old, new in substitutions.items():
-            print(f"  '{old}' -> '{new}'")
-        print("=" * 80)
     
     # Показываем примеры замен
-    print("\nПримеры замен:")
-    print("-" * 40)
-    for old, new in list(substitutions.items())[:3]:  # Показываем первые 3 примера
-        print(f"  Обычный текст: {old} -> {new}")
-        print(f"  В одинарных кавычках: '{old}' -> '{new}'")
-        print(f"  В двойных кавычках: \"{old}\" -> \"{new}\"")
-        print()
+    print("\n" + "=" * 80)
+    print("ПРИМЕРЫ ЗАМЕН (в два прохода):")
+    print("=" * 80)
+    
+    # Пример с многословным словосочетанием и отдельным словом
+    test_multiword = list(multiword_subs.items())[:2] if multiword_subs else []
+    test_singleword = list(singleword_subs.items())[:2] if singleword_subs else []
+    
+    if test_multiword:
+        print("\n1. МНОГОСЛОВНЫЕ СЛОВОСОЧЕТАНИЯ (заменяются первыми):")
+        for old, new in test_multiword:
+            print(f"   - '{old}' -> '{new}'")
+            words = old.split()
+            print(f"     Пример текста: Это {old} пример.")
+            print(f"     После замены:  Это {new} пример.")
+    
+    if test_singleword:
+        print("\n2. ОТДЕЛЬНЫЕ СЛОВА (заменяются после многословных):")
+        for old, new in test_singleword:
+            print(f"   - '{old}' -> '{new}'")
+    
+    # Пример комплексной замены
+    if test_multiword and test_singleword:
+        multi_old, multi_new = test_multiword[0]
+        single_old, single_new = test_singleword[0]
+        
+        print(f"\n3. КОМПЛЕКСНЫЙ ПРИМЕР:")
+        print(f"   Исходный текст: 'Это {multi_old} с {single_old} внутри'")
+        
+        # Проход 1: замена многословного
+        after_pass1 = f"Это {multi_new} с {single_old} внутри"
+        print(f"   После 1-го прохода: '{after_pass1}'")
+        
+        # Проход 2: замена отдельного слова
+        after_pass2 = f"Это {multi_new} с {single_new} внутри"
+        print(f"   После 2-го прохода: '{after_pass2}'")
+    
+    print("=" * 80)
     
     if args.dry_run:
         print(f"\nРежим предпросмотра (dry-run). Файлы не будут изменены.")
@@ -305,6 +367,10 @@ def main():
             print(f"Только с расширениями: {args.extensions}")
         if args.quotes_only:
             print(f"Заменять только текст в кавычках")
+        
+        print(f"\nПорядок замен:")
+        print(f"  1. {len(multiword_subs)} многословных словосочетаний")
+        print(f"  2. {len(singleword_subs)} отдельных слов")
         
         if unused_patterns:
             print(f"\nПРЕДУПРЕЖДЕНИЕ: {len(unused_patterns)} значений не будут использованы!")
@@ -320,65 +386,12 @@ def main():
     if args.quotes_only:
         print(f"Заменять только текст в кавычках")
     
-    # Если указан флаг --quotes-only, временно модифицируем функцию замены
-    if args.quotes_only:
-        original_replace_in_file = replace_in_file
-        
-        def replace_quotes_only(file_path, subs):
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                original_content = content
-                
-                # Заменяем только текст в кавычках
-                content = replace_quoted_content(content, subs)
-                
-                if content != original_content:
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    return True
-                return False
-            except Exception as e:
-                print(f"Ошибка при обработке файла {file_path}: {e}")
-                return False
-        
-        # Используем модифицированную функцию
-        import functools
-        process_func = functools.partial(replace_quotes_only, subs=substitutions)
-        
-        # Переопределяем функцию для обработки
-        changed_files = 0
-        total_files = 0
-        
-        if args.extensions:
-            extensions = [ext.lower() if ext.startswith('.') else f'.{ext.lower()}' for ext in args.extensions]
-        
-        for root, dirs, files in os.walk(args.directory):
-            for file in files:
-                file_path = Path(root) / file
-                
-                # Пропускаем сам файл подстановок
-                if str(file_path).endswith('.json'):
-                    continue
-                
-                if args.extensions:
-                    if file_path.suffix.lower() not in extensions:
-                        continue
-                
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        f.read(1024)
-                except:
-                    continue
-                
-                total_files += 1
-                if replace_quotes_only(file_path, substitutions):
-                    changed_files += 1
-                    print(f"Изменен: {file_path}")
-    else:
-        # Используем стандартную обработку
-        changed, total = process_directory(args.directory, substitutions, args.extensions)
+    print(f"\nЗапуск в два прохода:")
+    print(f"  Проход 1: замена {len(multiword_subs)} многословных словосочетаний")
+    print(f"  Проход 2: замена {len(singleword_subs)} отдельных слов")
+    
+    # Обрабатываем директорию в два прохода
+    changed, total = process_directory_two_pass(args.directory, multiword_subs, singleword_subs, args.extensions, args.quotes_only)
     
     print(f"\nГотово!")
     print(f"Обработано файлов: {total}")
