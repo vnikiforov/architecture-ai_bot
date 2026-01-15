@@ -1,2 +1,5 @@
 # Virtual environments
 .venv/
+.env
+indexing/db/
+__pycache__/

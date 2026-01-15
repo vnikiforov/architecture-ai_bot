@@ -1,0 +1,5 @@
+# Совместимо с macOS на CPU без AVX (Intel Core i5 2010)
+# Учебный RAG-проект: TF-IDF + ChromaDB
+
+chromadb>=0.5.0
+scikit-learn>=1.0.0,<1.4.0
